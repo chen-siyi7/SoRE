@@ -1,4 +1,3 @@
-
 evaluate_cs <- function(causal_idx, cs_list) {
   cs_list <- cs_list[lengths(cs_list) > 0]
   if (length(cs_list) == 0)
