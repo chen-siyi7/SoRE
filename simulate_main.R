@@ -1,18 +1,3 @@
-## ============================================================================
-## simulate_main.R
-## Simulation study for main paper (Section 5, Table 1, Figure 2)
-##
-## Dependencies:
-##   install.packages(c("susieR", "Matrix", "ggplot2", "dplyr", "MASS"))
-##
-## Outputs:
-##   simulation_results.csv
-##   fig_coverage.pdf
-##   fig_cssize.pdf
-##   fig_tau.pdf
-##   latex_table.txt
-## ============================================================================
-
 set.seed(42)
 suppressPackageStartupMessages({
   library(susieR)   # >= 0.12.35
@@ -316,39 +301,3 @@ p_tau <- ggplot(long_tau, aes(Config, hat_tau2)) +
 ggsave("fig_tau.pdf", p_tau, width=9, height=4)
 cat("Saved fig_tau.pdf\n")
 
-## ── 13. LaTeX table ───────────────────────────────────────────────────────────
-fmt_row <- function(r)
-  sprintf("%s & %d & %s & %3.0f & %5.1f & %3.0f & %6.1f & %3.0f & %6.1f & %.2f \\\\",
-          r$Config, r$s0, r$PVE,
-          r$cov_fm, r$sz_fm,
-          r$cov_susie, r$sz_susie,
-          r$cov_vsore, r$sz_vsore,
-          r$hat_tau2)
-
-lines <- c(
-  "\\begin{table}[htbp]",
-  "\\centering",
-  "\\caption{Per-signal 95\\% credible-set coverage (\\%) and mean CS size",
-  "  across eight configurations (30 replicates).",
-  "  Panel~A: $N_{\\mathrm{ref}}=10{,}000$.  Panel~B: $N_{\\mathrm{ref}}=500$.}",
-  "\\label{tab:sim}",
-  "\\small",
-  "\\begin{tabular}{lcc rr rr rr r}",
-  "\\toprule",
-  " & & &\\multicolumn{2}{c}{FINEMAP}",
-  "  &\\multicolumn{2}{c}{SuSiE-RSS}",
-  "  &\\multicolumn{2}{c}{V-SoRE} & \\\\",
-  "\\cmidrule(lr){4-5}\\cmidrule(lr){6-7}\\cmidrule(lr){8-9}",
-  "Config & $s_0$ & PVE & Cov & Size & Cov & Size & Cov & Size & $\\hat\\tau^2$\\\\",
-  "\\midrule",
-  "\\multicolumn{10}{l}{\\textit{Panel A: $N_{\\mathrm{ref}} = 10{,}000$}}\\\\[2pt]",
-  sapply(seq_len(nrow(df10)), function(i) fmt_row(df10[i, ])),
-  "\\midrule",
-  "\\multicolumn{10}{l}{\\textit{Panel B: $N_{\\mathrm{ref}} = 500$}}\\\\[2pt]",
-  sapply(seq_len(nrow(df500)), function(i) fmt_row(df500[i, ])),
-  "\\bottomrule",
-  "\\end{tabular}",
-  "\\end{table}"
-)
-writeLines(lines, "latex_table.txt")
-cat("Saved latex_table.txt\n\nAll done.\n")
