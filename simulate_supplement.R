@@ -1,17 +1,3 @@
-## ============================================================================
-## simulate_supplement.R
-## Supplement simulations: S11 (tau2 calibration) and S13 (IIA/Mallows)
-##
-## Dependencies:
-##   install.packages(c("susieR", "Matrix", "dplyr"))
-##
-## Outputs:
-##   calibration_results.csv
-##   iia_results.csv
-##   latex_table_S11.txt
-##   latex_table_S13.txt
-## ============================================================================
-
 set.seed(42)
 suppressPackageStartupMessages({
   library(susieR)   # >= 0.12.35
@@ -235,30 +221,3 @@ iia_rows <- lapply(seq_len(nrow(CONFIGS_IIA)), function(i) {
 df_iia <- bind_rows(iia_rows)
 write.csv(df_iia, "iia_results.csv", row.names = FALSE)
 cat("Saved iia_results.csv\n")
-
-## LaTeX table S13
-lines_s13 <- c(
-  "\\begin{table}[htbp]",
-  "\\centering",
-  "\\caption{Pearson correlation between V-SoRE and M-SoRE posterior inclusion",
-  "  probabilities, 30 replicates per configuration.",
-  "  M-SoRE uses $\\sqrt{\\tilde\\omega_j}$ in place of $\\tilde\\omega_j$,",
-  "  reducing annotation contrast to approximate Mallows symmetry.",
-  "  Coverage and mean CS size shown for M-SoRE.}",
-  "\\label{t:iia}",
-  "\\small",
-  "\\begin{tabular}{lccccc}",
-  "\\toprule",
-  "Config & $s_0$ & PVE & PIP correlation & M-SoRE coverage & M-SoRE CS size \\\\",
-  "\\midrule",
-  sapply(seq_len(nrow(df_iia)), function(i) {
-    r <- df_iia[i, ]
-    sprintf("%s & %d & %s & %.3f & %3.0f & %5.1f \\\\",
-            r$Config, r$s0, r$PVE, r$pip_corr, r$msore_cov, r$msore_sz)
-  }),
-  "\\bottomrule",
-  "\\end{tabular}",
-  "\\end{table}"
-)
-writeLines(lines_s13, "latex_table_S13.txt")
-cat("Saved latex_table_S13.txt\n\nAll supplement simulations done.\n")
