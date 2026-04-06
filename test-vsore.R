@@ -1,5 +1,3 @@
-## tests/testthat/test-vsore.R
-
 test_that("vsore returns valid output structure", {
   set.seed(1)
   p  <- 50
