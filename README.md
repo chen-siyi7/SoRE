@@ -111,7 +111,7 @@ This code is distributed under the MIT License. See `LICENSE` for the full text.
 
 If you use this code in published work, please cite:
 
-> Chen S. (2026) *Annotation-Ranked Bayesian Fine-Mapping of GWAS Signals with Data-Adaptive Reversion to Exchangeability.* Submitted to *Statistics in Medicine*.
+> Chen S. (2026) *Annotation-Ranked Bayesian Fine-Mapping of GWAS Signals with Data-Adaptive Reversion to Exchangeability.*
 
 ## Contact
 
