@@ -1,303 +1,165 @@
-set.seed(42)
-suppressPackageStartupMessages({
-  library(susieR)   # >= 0.12.35
-  library(Matrix)
-  library(MASS)
-  library(ggplot2)
-  library(dplyr)
-})
+## =============================================================================
+## Main simulation: reproduces Table 1 of the manuscript.
+##
+## Eight configurations (C1-C8) crossing:
+##   - sparsity s_0 in {1, 2, 3}
+##   - annotation regime: informative, partial, uninformative, anti-informative
+##
+## Each configuration is replicated R = 500 times. Output is a data frame with
+## per-configuration mean and Monte Carlo SE for coverage and mean CS size,
+## for both SuSiE-RSS and V-SoRE.
+##
+## Usage:
+##   Rscript simulate_main.R [output_path]
+## Default output: sim_results.rds in the working directory.
+## =============================================================================
 
-## ── parameters ───────────────────────────────────────────────────────────────
-P      <- 500
-N_GWAS <- 50000
-N_REPS <- 500
+source("vsore.R")
+source("weights.R")
+source("evaluate.R")
+source("ld_utils.R")
 
-## ── 1. LD matrix ─────────────────────────────────────────────────────────────
-build_ld <- function(p = 500, n_blocks = 5, rho = 0.9, ridge = 0.01) {
-  block <- p / n_blocks
-  d     <- seq_len(block)
-  ar1   <- rho ^ abs(outer(d, d, "-"))
-  R     <- as.matrix(bdiag(replicate(n_blocks, ar1, simplify = FALSE)))
-  (1 - ridge) * R + ridge * diag(p)
+#' Generate one simulation replicate.
+#'
+#' @param p        Number of variants.
+#' @param s0       Number of true causal variants.
+#' @param U        Annotation elevation. U = 0 -> uninformative; U > 0 ->
+#'                 causal variants get exp(U) extra weight; U < 0 ->
+#'                 anti-informative.
+#' @param effect   True effect-size magnitude (per causal variant).
+#' @param n_eff   Effective sample size for SuSiE-RSS.
+#' @param p_blocks Number of LD blocks (passed to build_ld).
+#' @param rho      AR(1) parameter (passed to build_ld).
+#' @param noise_sd Standard deviation of Gaussian noise added to anchor weights
+#'                 (creates partial-information regime when 0 < U < 1).
+#' @return One-row data frame with method, coverage, cs_size, hat_tau2,
+#'         and other diagnostics.
+generate_replicate <- function(p, s0, U, effect, n_eff,
+                               p_blocks = 5, rho = 0.85, noise_sd = 0.5) {
+  R <- build_ld(p = p, n_blocks = p_blocks, rho = rho)
+  causal_idx <- sample.int(p, s0)
+  b <- numeric(p); b[causal_idx] <- effect
+  z <- sample_z(R, b)
+
+  ## Anchor weights: log-normal noise + annotation elevation U on causal indices.
+  log_omega <- stats::rnorm(p, sd = noise_sd)
+  log_omega[causal_idx] <- log_omega[causal_idx] + U
+  omega0 <- make_anchor_weights(log_omega)
+
+  ## SuSiE-RSS baseline (uniform prior).
+  fit_susie <- susieR::susie_rss(z = z, R = R, n = n_eff, L = 10)
+  cs_susie <- susieR::susie_get_cs(fit_susie)$cs
+  cs_susie <- cs_susie[lengths(cs_susie) > 0]
+  ev_susie <- evaluate_cs(causal_idx, cs_susie)
+
+  ## V-SoRE with annotation-derived anchors.
+  res_vsore <- vsore(z = z, R = R, omega0 = omega0, n_eff = n_eff)
+  ev_vsore  <- evaluate_cs(causal_idx, res_vsore$cs)
+
+  rbind(
+    data.frame(method   = "SuSiE-RSS",
+               coverage = ev_susie["coverage"],
+               cs_size  = ev_susie["cs_size"],
+               n_cs     = ev_susie["n_cs"],
+               hat_tau2 = NA_real_,
+               n_iter   = NA_integer_,
+               row.names = NULL),
+    data.frame(method   = "V-SoRE",
+               coverage = ev_vsore["coverage"],
+               cs_size  = ev_vsore["cs_size"],
+               n_cs     = ev_vsore["n_cs"],
+               hat_tau2 = res_vsore$hat_tau2,
+               n_iter   = res_vsore$n_iter,
+               row.names = NULL)
+  )
 }
 
-## ── 2. Mismatched reference LD ───────────────────────────────────────────────
-make_mismatch <- function(R_true, nref, seed = 99) {
-  p <- nrow(R_true)
-  set.seed(seed)
-  noise <- matrix(rnorm(p * p, sd = 1 / sqrt(nref)), p, p)
-  noise <- (noise + t(noise)) / 2
-  R_m   <- R_true + noise
-  R_m   <- (R_m + t(R_m)) / 2
-  ev    <- eigen(R_m, symmetric = TRUE, only.values = TRUE)$values
-  if (min(ev) < 0.01)
-    R_m <- R_m + (0.01 - min(ev)) * diag(p)
-  d   <- sqrt(diag(R_m))
-  R_m <- R_m / outer(d, d)
-  0.99 * R_m + 0.01 * diag(p)
+
+#' Configuration table for the main simulation.
+make_configs <- function() {
+  data.frame(
+    config   = paste0("C", 1:8),
+    s0       = c(1, 1, 1, 1, 2, 2, 1, 3),
+    U        = c(2.0, 1.5, 1.0, 2.5, 2.0, 1.5, 0.0, 2.0),
+    effect   = c(0.20, 0.20, 0.18, 0.22, 0.18, 0.18, 0.18, 0.18),
+    p        = rep(500, 8),
+    p_blocks = rep(5, 8),
+    rho      = rep(0.85, 8),
+    n_eff    = rep(50000, 8),
+    noise_sd = rep(0.5, 8),
+    stringsAsFactors = FALSE
+  )
 }
 
-## ── 3. Anchor weights ────────────────────────────────────────────────────────
-make_weights <- function(causal_idx, p, pve, s0,
-                         N = 50000, rg = 0.6, R = NULL,
-                         degraded = FALSE) {
-  a <- runif(p)
-  if (!degraded)
-    for (j in causal_idx)
-      a[j] <- min(a[j] + runif(1, 2.5, 3.5), 4.0)
-  b2 <- numeric(p)
-  if (length(causal_idx) > 0 && !degraded) {
-    bp           <- numeric(p)
-    bp[causal_idx] <- rnorm(s0, 0, sqrt(pve * N / s0))
-    b2             <- rg * bp
-  }
-  z2 <- if (!is.null(R)) as.numeric(R %*% b2 + t(chol(R)) %*% rnorm(p)) else numeric(p)
-  exp(0.8 * a) * (1 + abs(z2))
-}
 
-## ── 4. Spearman helper ───────────────────────────────────────────────────────
-spearman_r <- function(x, y) {
-  n <- length(x)
-  1 - 6 * sum((rank(x) - rank(y))^2) / (n * (n^2 - 1))
-}
+#' Run all configurations and aggregate per-config results.
+#'
+#' @param R_replicates Number of replicates per configuration. Default 500.
+#' @param verbose      If TRUE, print progress per configuration.
+#' @return data.frame with per-configuration aggregated metrics.
+run_main_simulation <- function(R_replicates = 500L, verbose = TRUE) {
+  configs <- make_configs()
+  out <- list()
 
-## ── 5. V-SoRE ────────────────────────────────────────────────────────────────
-## n_eff: effective sample size passed to susie_rss as `n`
-vsore <- function(z, R, omega0, n_eff, L = 10, K0 = 20,
-                  T_max = 15, delta = 1e-3) {
-  log_om0     <- log(omega0 + 1e-300)
-  I_K0        <- order(-omega0)[seq_len(K0)]
-  
-  fit         <- susie_rss(z, R, n = n_eff, L = L,
-                           prior_weights = omega0 / sum(omega0))
-  gamma       <- susie_get_pip(fit)
-  hat_tau2    <- 0.5
-  log_om_prev <- log_om0
-  
-  for (t in seq_len(T_max)) {
-    rs       <- spearman_r(omega0[I_K0], gamma[I_K0])
-    ht       <- max(0.05, 1.5 * (1 - rs))
-    gc       <- pmin(pmax(gamma, 1e-6), 1 - 1e-6)
-    log_ot   <- (log_om0 + ht * log(gc)) / (1 + ht)
-    ot       <- exp(log_ot)
-    
-    fit_new  <- susie_rss(z, R, n = n_eff, L = L,
-                          prior_weights = ot / sum(ot))
-    gamma    <- susie_get_pip(fit_new)
-    dw       <- max(abs(log_ot - log_om_prev))
-    log_om_prev <- log_ot
-    fit      <- fit_new
-    hat_tau2 <- ht
-    
-    if (t >= 3 && dw < delta) break
-  }
-  list(fit = fit, pip = gamma, hat_tau2 = hat_tau2)
-}
+  for (k in seq_len(nrow(configs))) {
+    cfg <- configs[k, ]
+    if (verbose)
+      message(sprintf("[%s] s0=%d, U=%.1f, effect=%.2f, R=%d",
+                      cfg$config, cfg$s0, cfg$U, cfg$effect, R_replicates))
 
-## ── 6. Evaluation ────────────────────────────────────────────────────────────
-evaluate <- function(causal_idx, cs_list) {
-  cs_list <- cs_list[lengths(cs_list) > 0]   # drop empty credible sets
-  if (length(cs_list) == 0)
-    return(c(coverage = 0.0, cs_size = 0.0))
-  cov <- mean(sapply(causal_idx,
-                     function(c) any(sapply(cs_list, function(cs) c %in% cs))))
-  sz  <- mean(sapply(cs_list, length))
-  c(coverage = as.numeric(cov), cs_size = as.numeric(sz))
-}
+    rep_results <- vector("list", R_replicates)
+    for (r in seq_len(R_replicates)) {
+      rep_results[[r]] <- generate_replicate(
+        p        = cfg$p,
+        s0       = cfg$s0,
+        U        = cfg$U,
+        effect   = cfg$effect,
+        n_eff    = cfg$n_eff,
+        p_blocks = cfg$p_blocks,
+        rho      = cfg$rho,
+        noise_sd = cfg$noise_sd
+      )
+    }
 
-## ── 7. FINEMAP (univariate Wakefield ABF) ────────────────────────────────────
-finemap_simple <- function(z, p, W) {
-  log_bf <- -0.5 * log(1 + W) + 0.5 * W * z^2 / (1 + W)
-  pip    <- exp(log_bf - log(p))
-  pip    <- pip / sum(pip)
-  ord    <- order(-pip)
-  cum    <- cumsum(pip[ord])
-  idx    <- which(cum >= 0.95)
-  n_cs   <- if (length(idx) > 0) idx[1] else p   # take all if threshold never reached
-  list(pip = pip, cs = list(ord[seq_len(n_cs)]))
-}
+    df <- do.call(rbind, rep_results)
+    by_method <- split(df, df$method)
 
-## ── 8. Single replicate ──────────────────────────────────────────────────────
-run_rep <- function(R_true, R_inf, s0, pve, N = 50000, p = 500,
-                    degraded = FALSE) {
-  causal    <- sort(sample(seq_len(p / 5), s0))
-  b         <- numeric(p)
-  b[causal] <- rnorm(s0, 0, sqrt(pve * N / s0))
-  z         <- as.numeric(R_true %*% b + t(chol(R_true)) %*% rnorm(p))
-  W         <- max(1.0, (max(abs(z)) / 2)^2)
-  
-  omega0 <- make_weights(causal, p, pve, s0, N = N, R = R_true, degraded = degraded)
-  
-  ## SuSiE-RSS
-  fit_s  <- susie_rss(z, R_inf, n = N, L = 10)
-  cs_s   <- susie_get_cs(fit_s)$cs
-  ev_s   <- evaluate(causal, cs_s)
-  
-  ## V-SoRE
-  res_v  <- vsore(z, R_inf, omega0, n_eff = N, L = 10, K0 = min(20, 2 * s0 + 5))
-  cs_v   <- susie_get_cs(res_v$fit)$cs
-  ev_v   <- evaluate(causal, cs_v)
-  
-  ## FINEMAP
-  fm     <- finemap_simple(z, p, W)
-  ev_f   <- evaluate(causal, fm$cs)
-  
-  c(cov_s = ev_s[["coverage"]],  sz_s = ev_s[["cs_size"]],
-    cov_v = ev_v[["coverage"]],  sz_v = ev_v[["cs_size"]],
-    tau2  = res_v$hat_tau2,
-    cov_f = ev_f[["coverage"]],  sz_f = ev_f[["cs_size"]])
-}
-
-## ── 9. Configurations ────────────────────────────────────────────────────────
-CONFIGS <- data.frame(
-  label    = c("C1","C2","C3","C4","C5","C6","C7","C8"),
-  s0       = c(1, 2, 3, 1, 2, 3, 3, 3),
-  pve      = c(.005, .005, .005, .02, .02, .02, .005, .005),
-  degraded = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE),
-  ld_mis   = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE),
-  stringsAsFactors = FALSE
-)
-
-## ── 10. Build LD matrices ─────────────────────────────────────────────────────
-cat("Building LD matrices...\n")
-R_true <- build_ld(p = P)
-R_10k  <- make_mismatch(R_true, nref = 10000, seed = 99)
-R_500  <- make_mismatch(R_true, nref = 500,   seed = 100)
-
-## ── 11. Main loop (two reference-panel sizes) ─────────────────────────────────
-run_panel <- function(panel_label, R_mis) {
-  cat(sprintf("\nPanel N_ref = %s\n", panel_label))
-  rows <- vector("list", nrow(CONFIGS))
-  
-  for (i in seq_len(nrow(CONFIGS))) {
-    cfg   <- CONFIGS[i, ]
-    R_inf <- if (cfg$ld_mis) R_mis else R_true
-    set.seed(42 + i)
-    
-    mat <- replicate(N_REPS, {
-      run_rep(R_true, R_inf, cfg$s0, cfg$pve,
-              N = N_GWAS, p = P, degraded = cfg$degraded)
+    cfg_out <- lapply(names(by_method), function(m) {
+      sub <- by_method[[m]]
+      ## evaluate_cs() rows are columns coverage, cs_size, n_cs in df.
+      ev_list <- lapply(seq_len(nrow(sub)), function(i)
+        c(coverage = sub$coverage[i], cs_size = sub$cs_size[i]))
+      agg <- aggregate_replicates(ev_list)
+      data.frame(config        = cfg$config,
+                 method        = m,
+                 coverage_mean = agg["coverage_mean"],
+                 coverage_mcse = agg["coverage_mcse"],
+                 cs_size_mean  = agg["cs_size_mean"],
+                 cs_size_mcse  = agg["cs_size_mcse"],
+                 mean_hat_tau2 = if (m == "V-SoRE") mean(sub$hat_tau2, na.rm = TRUE)
+                                 else NA_real_,
+                 mean_n_iter   = if (m == "V-SoRE") mean(sub$n_iter,   na.rm = TRUE)
+                                 else NA_real_,
+                 R_replicates  = R_replicates,
+                 stringsAsFactors = FALSE)
     })
-    
-    mn <- function(k) mean(mat[k, ])
-    se <- function(k) sd(mat[k, ]) / sqrt(N_REPS)
-    
-    rows[[i]] <- data.frame(
-      Panel     = panel_label,
-      Config    = cfg$label,
-      s0        = cfg$s0,
-      PVE       = sprintf("%.1f%%", cfg$pve * 100),
-      cov_fm    = 100 * mn("cov_f"),
-      sz_fm     = mn("sz_f"),
-      cov_susie = 100 * mn("cov_s"),
-      sz_susie  = mn("sz_s"),
-      cov_vsore = 100 * mn("cov_v"),
-      sz_vsore  = mn("sz_v"),
-      hat_tau2  = mn("tau2"),
-      se_cov_s  = 100 * se("cov_s"),
-      se_cov_v  = 100 * se("cov_v"),
-      se_sz_s   = se("sz_s"),
-      se_sz_v   = se("sz_v"),
-      se_tau2   = se("tau2")
-    )
-    
-    cat(sprintf("  %s  SuSiE %3.0f%%/%6.1f  VSoRE %3.0f%%/%6.1f  tau2=%.2f\n",
-                cfg$label,
-                rows[[i]]$cov_susie, rows[[i]]$sz_susie,
-                rows[[i]]$cov_vsore, rows[[i]]$sz_vsore,
-                rows[[i]]$hat_tau2))
+    out[[k]] <- do.call(rbind, cfg_out)
   }
-  bind_rows(rows)
+  res <- do.call(rbind, out)
+  rownames(res) <- NULL
+  res
 }
 
-df10  <- run_panel("10k",  R_10k)
-df500 <- run_panel("500",  R_500)
-df    <- bind_rows(df10, df500)
 
-write.csv(df, "simulation_results.csv", row.names = FALSE)
-cat("\nSaved simulation_results.csv\n")
+## --- Entry point when run as a script -----------------------------------------
+if (sys.nframe() == 0L) {
+  args <- commandArgs(trailingOnly = TRUE)
+  output_path <- if (length(args) >= 1L) args[1] else "sim_results.rds"
 
-## ── 12. Figures ───────────────────────────────────────────────────────────────
-cfgs <- CONFIGS$label
-cols <- c(FINEMAP = "#4e79a7", `SuSiE-RSS` = "#f28e2b", `V-SoRE` = "#59a14f")
+  set.seed(20260506)
+  results <- run_main_simulation(R_replicates = 500L, verbose = TRUE)
 
-panel_labels <- c("10k" = "N[ref]==10000", "500" = "N[ref]==500")
-
-long_cov <- bind_rows(
-  df |> transmute(Panel, Config, Method = "FINEMAP",   val = cov_fm,    se = 0),
-  df |> transmute(Panel, Config, Method = "SuSiE-RSS", val = cov_susie, se = se_cov_s),
-  df |> transmute(Panel, Config, Method = "V-SoRE",    val = cov_vsore, se = se_cov_v)
-) |>
-  mutate(Method = factor(Method, levels = c("FINEMAP","SuSiE-RSS","V-SoRE")),
-         Config = factor(Config, levels = cfgs),
-         Panel  = factor(Panel,  levels = c("10k","500"), labels = panel_labels))
-
-long_sz <- bind_rows(
-  df |> transmute(Panel, Config, Method = "FINEMAP",   val = sz_fm,    se = 0),
-  df |> transmute(Panel, Config, Method = "SuSiE-RSS", val = sz_susie, se = se_sz_s),
-  df |> transmute(Panel, Config, Method = "V-SoRE",    val = sz_vsore, se = se_sz_v)
-) |>
-  mutate(Method = factor(Method, levels = c("FINEMAP","SuSiE-RSS","V-SoRE")),
-         Config = factor(Config, levels = cfgs),
-         Panel  = factor(Panel,  levels = c("10k","500"), labels = panel_labels))
-
-long_tau <- df |>
-  mutate(Config = factor(Config, levels = cfgs),
-         Panel  = factor(Panel,  levels = c("10k","500"), labels = panel_labels))
-
-theme_sore <- theme_classic(base_size = 11) +
-  theme(legend.position = "bottom",
-        strip.background = element_blank(),
-        strip.text = element_text(size = 11))
-
-## Panel A
-p_cov <- ggplot(long_cov, aes(Config, val, fill = Method)) +
-  geom_col(position = position_dodge(0.8), width = 0.75, alpha = 0.85) +
-  geom_errorbar(aes(ymin = val - se, ymax = val + se),
-                position = position_dodge(0.8), width = 0.3, linewidth = 0.7) +
-  geom_hline(yintercept = 95, linetype = "dashed", linewidth = 0.8) +
-  facet_wrap(~Panel, labeller = label_parsed) +
-  scale_fill_manual(values = cols) +
-  scale_y_continuous(limits = c(0, 115), breaks = seq(0, 100, 25)) +
-  labs(x = NULL, y = "Per-signal coverage (%)", fill = NULL,
-       title = "Panel A: Per-signal 95% credible-set coverage") +
-  theme_sore
-ggsave("fig_coverage.pdf", p_cov, width = 10, height = 4.5)
-cat("Saved fig_coverage.pdf\n")
-
-## Panel B
-p_sz <- ggplot(long_sz, aes(Config, val, fill = Method)) +
-  geom_col(position = position_dodge(0.8), width = 0.75, alpha = 0.85) +
-  geom_errorbar(aes(ymin = pmax(val - se, 0.1), ymax = val + se),
-                position = position_dodge(0.8), width = 0.3, linewidth = 0.7) +
-  facet_wrap(~Panel, labeller = label_parsed) +
-  scale_fill_manual(values = cols) +
-  scale_y_log10() +
-  labs(x = NULL, y = "Mean CS size (log scale)", fill = NULL,
-       title = "Panel B: Mean credible-set size") +
-  theme_sore
-ggsave("fig_cssize.pdf", p_sz, width = 10, height = 4.5)
-cat("Saved fig_cssize.pdf\n")
-
-## Panel C
-p_tau <- ggplot(long_tau, aes(Config, hat_tau2)) +
-  annotate("rect", xmin=-Inf, xmax=Inf, ymin=0,   ymax=0.2,
-           fill="steelblue", alpha=0.10) +
-  annotate("rect", xmin=-Inf, xmax=Inf, ymin=0.2, ymax=1.0,
-           fill="goldenrod", alpha=0.10) +
-  annotate("rect", xmin=-Inf, xmax=Inf, ymin=1.0, ymax=2.5,
-           fill="firebrick", alpha=0.10) +
-  geom_hline(yintercept=0.2, linetype="dashed", colour="steelblue", linewidth=0.9) +
-  geom_hline(yintercept=1.0, linetype="dashed", colour="firebrick", linewidth=0.9) +
-  geom_errorbar(aes(ymin=hat_tau2-se_tau2, ymax=hat_tau2+se_tau2),
-                width=0.25, linewidth=0.9, colour="#59a14f") +
-  geom_point(size=3.5, colour="#59a14f") +
-  facet_wrap(~Panel, labeller=label_parsed) +
-  scale_y_continuous(limits=c(0, 2.0)) +
-  labs(x=NULL, y=expression(hat(tau)^2),
-       title=expression("Panel C: V-SoRE annotation diagnostic " * hat(tau)^2)) +
-  theme_classic(base_size=11) +
-  theme(strip.background=element_blank(), strip.text=element_text(size=11))
-ggsave("fig_tau.pdf", p_tau, width=9, height=4)
-cat("Saved fig_tau.pdf\n")
-
+  saveRDS(results, output_path)
+  message("\nSaved results to: ", output_path)
+  print(results, row.names = FALSE)
+}
