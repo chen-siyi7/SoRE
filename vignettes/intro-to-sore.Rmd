@@ -1,0 +1,118 @@
+---
+title: "Introduction to SoRE: Annotation-Ranked Bayesian Fine-Mapping"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to SoRE}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7, fig.height = 4.5
+)
+```
+
+## What SoRE does
+
+SoRE (Sum of Ranked Effects) is a Bayesian fine-mapping prior that uses
+functional annotation to localize causal variants within GWAS-identified
+regions. Two design choices distinguish it from existing
+annotation-informed methods:
+
+1. **Ordering, not weights.** The prior is placed on the variant ordering
+   through a Plackett-Luce distribution, so it is invariant to monotone
+   rescaling of the annotation scores. There is no need to put
+   heterogeneous annotation sources on a common scale.
+
+2. **Locus-adaptive trust.** A single parameter $\tau^2$, estimated from
+   the agreement between annotation ranks and current PIPs, controls
+   how much the prior trusts the annotation at each locus. When
+   annotation and data disagree, $\tau^2$ grows and the output reverts
+   to SuSiE-RSS.
+
+The package exposes two interfaces:
+
+- `vsore()` runs the empirical-Bayes variational implementation (V-SoRE).
+  This is the recommended interface for genome-wide pipelines.
+- `sore_gibbs()` runs the full blocked Gibbs sampler for the complete
+  hierarchical posterior. Use this when you need full uncertainty
+  quantification.
+
+## A simple synthetic example
+
+```{r}
+library(SoRE)
+
+set.seed(1)
+p <- 200
+n <- 50000
+s0 <- 2
+
+# AR(1) LD matrix
+R <- 0.9 ^ abs(outer(1:p, 1:p, "-"))
+
+# Two causal variants at positions 50 and 150
+causal <- c(50, 150)
+b <- numeric(p); b[causal] <- 5
+
+# Draw z-scores under the RSS model
+z <- as.numeric(R %*% b + crossprod(chol(R), rnorm(p)))
+
+# SuSiE-RSS baseline (uniform weights)
+fit_uniform <- vsore(z, R, anchor_weights = rep(1, p), n = n)
+cat("Uniform weights: ", sum(fit_uniform$pip > 0.5), "variants with PIP > 0.5\n")
+
+# Anchor weights that mark the causal variants as plausible
+omega <- rep(1, p)
+omega[causal] <- 100
+
+fit_annot <- vsore(z, R, anchor_weights = omega, n = n)
+cat("Annotated:       ", sum(fit_annot$pip > 0.5), "variants with PIP > 0.5\n")
+cat("tau2 =", round(fit_annot$tau2, 3), "\n")
+```
+
+## Credible sets
+
+```{r}
+cs_uniform <- credible_sets(fit_uniform$pip, coverage = 0.95, R = R,
+                            min_purity = 0.5)
+cs_annot   <- credible_sets(fit_annot$pip,   coverage = 0.95, R = R,
+                            min_purity = 0.5)
+cs_uniform$size
+cs_annot$size
+```
+
+## Interpreting the tau-squared diagnostic
+
+```{r}
+tau2_diagnostic(c(0.1, 0.5, 1.3, NA))
+```
+
+A `tau2` below 0.2 indicates strong annotation-data concordance, values in
+[0.2, 1] indicate moderate concordance, and values above 1 indicate that
+the data have substantially overridden the annotation ordering. A real
+locus with tau2 above 1 should be treated as effectively unannotated.
+
+## Building anchor weights from multiple sources
+
+```{r}
+set.seed(1)
+p <- 200
+omega <- build_anchor_weights(
+  coding     = sample(1:3, p, replace = TRUE, prob = c(0.95, 0.04, 0.01)),
+  chrom_open = runif(p) < 0.05,
+  conserved  = runif(p) < 0.10,
+  z_prior    = rnorm(p, sd = 0.5)
+)
+summary(omega)
+```
+
+## Citation
+
+If you use SoRE in your work, please cite:
+
+Chen, S. (2026). Bayesian Fine-Mapping with an Annotation Ranking Prior
+Using GWAS Summary Statistics. *Biometrics*.

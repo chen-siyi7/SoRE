@@ -1,0 +1,39 @@
+Package: SoRE
+Type: Package
+Title: Annotation-Ranked Bayesian Fine-Mapping of GWAS Signals
+Version: 0.1.0
+Authors@R: 
+    person(given = "Siyi", family = "Chen",
+           role = c("aut", "cre"),
+           email = "sche11@lsuhsc.edu",
+           comment = c(ORCID = "0000-0000-0000-0000"))
+Description: Implements SoRE (Sum of Ranked Effects), a Bayesian fine-mapping
+    prior that encodes functional annotations through a Plackett-Luce
+    distribution on variant orderings, and V-SoRE, an empirical-Bayes
+    variational implementation that wraps SuSiE-RSS in an outer reweighting
+    loop. The method localizes causal variants within GWAS-identified regions
+    using GWAS summary statistics and external functional annotation, with a
+    locus-specific variance parameter that controls fidelity to the annotation
+    ordering and reverts to SuSiE-RSS when annotation and data disagree.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.2
+Depends: R (>= 4.2.0)
+Imports:
+    susieR (>= 0.12.0),
+    Matrix (>= 1.5.0),
+    stats,
+    utils
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown,
+    BEDMatrix (>= 2.0.0),
+    data.table (>= 1.14),
+    ggplot2 (>= 3.4),
+    mvtnorm (>= 1.1)
+URL: https://github.com/chen-siyi7/SoRE
+BugReports: https://github.com/chen-siyi7/SoRE/issues
+VignetteBuilder: knitr
+Config/testthat/edition: 3

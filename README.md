@@ -1,118 +1,160 @@
-# SoRE: Annotation-Ranked Bayesian Fine-Mapping
+# SoRE: Annotation-Ranked Bayesian Fine-Mapping of GWAS Signals
 
-R implementation of the **SoRE** (Sum of Ranked Effects) prior and the **V-SoRE** empirical-Bayes reweighting algorithm for fine-mapping genome-wide association study (GWAS) summary statistics, accompanying the manuscript:
+<!-- badges: start -->
+[![R-CMD-check](https://github.com/chen-siyi7/SoRE/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/chen-siyi7/SoRE/actions/workflows/R-CMD-check.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<!-- badges: end -->
 
-> Chen S. (2026) *Annotation-Ranked Bayesian Fine-Mapping of GWAS Signals with Data-Adaptive Reversion to Exchangeability.*
+R package implementation of **SoRE** (Sum of Ranked Effects), a Bayesian
+fine-mapping prior that encodes functional annotation through a
+Plackett-Luce distribution on variant orderings, with a locus-specific
+variance parameter that adaptively controls how closely the prior follows
+the annotation ranking.
 
-## Overview
+The package implements two interfaces:
 
-V-SoRE wraps `susieR::susie_rss()` as an inner solver inside an outer empirical-Bayes loop that reweights variants by the agreement between annotation ranks and current posterior inclusion probabilities. The locus-specific dispersion parameter `hat_tau2` quantifies that agreement: small values (`< 0.2`) indicate strong agreement, intermediate values (`0.2`-`1`) moderate agreement, and values above `1` indicate that the data have substantially overridden the annotation prior.
-
-Under uniform anchor weights, V-SoRE bypasses the reweighting loop and returns the SuSiE-RSS solution directly with `hat_tau2 = NA`, as required by the algorithmic-reduction guarantee in Proposition 3 of the manuscript.
+- **`vsore()`** — empirical-Bayes variational implementation that wraps
+  SuSiE-RSS in an outer reweighting loop. Recommended for genome-wide
+  pipelines. Runs in under two seconds per locus at p = 500.
+- **`sore_gibbs()`** — full blocked Gibbs sampler for the complete
+  hierarchical posterior. Use when full uncertainty quantification is
+  required.
 
 ## Installation
 
-The code uses base R and depends on `susieR`. Optional helper dependencies are `Matrix` (for block-diagonal LD construction) and `testthat` (for the test suite).
-
 ```r
-install.packages(c("susieR", "Matrix", "testthat"))
+# install.packages("remotes")
+remotes::install_github("chen-siyi7/SoRE")
 ```
 
-There is no need to install this code as a package; source the relevant files at the start of your script:
+The package depends on `susieR (>= 0.12.0)`. Install it first if needed:
 
 ```r
-source("vsore.R")
-source("weights.R")
-source("evaluate.R")
-source("ld_utils.R")
+install.packages("susieR")
 ```
 
-## Quick example
+## Quick start
 
 ```r
-source("vsore.R")
-source("weights.R")
-source("ld_utils.R")
+library(SoRE)
 
 set.seed(1)
-p <- 200
-R <- build_ld(p, n_blocks = 5, rho = 0.85)
+p <- 200; n <- 50000
+R <- 0.9 ^ abs(outer(1:p, 1:p, "-"))
+causal <- c(50, 150)
+b <- numeric(p); b[causal] <- 5
+z <- as.numeric(R %*% b + crossprod(chol(R), rnorm(p)))
 
-## Two true causal variants with effect size 0.18.
-b <- numeric(p)
-b[c(45, 130)] <- 0.18
-z <- sample_z(R, b)
+# Build anchor weights (here: strong annotation at the causal positions)
+omega <- rep(1, p); omega[causal] <- 100
 
-## Anchor weights with mild annotation elevation at the causal variants.
-log_omega <- rnorm(p, sd = 0.5)
-log_omega[c(45, 130)] <- log_omega[c(45, 130)] + 2.0
-omega0 <- make_anchor_weights(log_omega)
+# Fit V-SoRE
+fit <- vsore(z, R, anchor_weights = omega, n = n)
 
-res <- vsore(z, R, omega0, n_eff = 50000)
-res$hat_tau2          # estimated annotation-data agreement
-res$pip[c(45, 130)]   # PIPs at the true causal variants
-res$cs                # 95% credible sets
+# Inspect
+fit$tau2                              # annotation-data agreement
+sum(fit$pip > 0.5)                    # variants with PIP > 0.5
+credible_sets(fit$pip, R = R, min_purity = 0.5)
 ```
 
-## Reproducing the manuscript
+See `vignette("intro-to-sore")` for a longer walkthrough.
 
-The two simulation scripts reproduce the figures and tables of the paper:
+## Method summary
+
+SoRE places a Plackett-Luce prior on the latent variant ordering r and
+maps each rank position to a prior inclusion probability through a logistic
+function. The model is
+
+```
+omega_j   = tilde-omega_j * exp(eta_j),   eta_j ~ N(0, tau^2)
+r | omega ~ PL(omega)
+z_j | k, alpha, r ~ Bernoulli(expit(alpha (k - j)))
+b_j | z_j ~ z_j N(0, W) + (1 - z_j) delta_0
+zhat | b  ~ N(R b, R)
+```
+
+The key design choices:
+
+1. **Scale invariance.** PL(r | c·omega) = PL(r | omega) for any c > 0, so
+   the prior depends on the anchor weights only through the ordering they
+   induce. Heterogeneous annotation sources do not need cross-source
+   calibration.
+
+2. **Adaptive trust.** The locus-specific tau^2 is estimated from the
+   Spearman rank correlation between the anchor weights and the current
+   PIPs. When annotation and data agree, tau^2 is small and the prior
+   anchors tightly to the annotation. When they disagree, tau^2 grows and
+   V-SoRE reverts to SuSiE-RSS.
+
+3. **Theoretical guarantee.** Under an oracle annotation condition, the
+   posterior contraction rate improves from O(s_0 log p / N) to
+   O(s_0 log K_0 / N), a log(p / K_0) reduction.
+
+## Reproducing the manuscript results
+
+The `inst/scripts/` directory contains the analysis scripts:
+
+- **`simulate_sore.R`** — reproduces the eight-configuration simulation
+  study (Table 1, Figure 1 of the manuscript) at both N_ref = 10,000 and
+  N_ref = 500. Calls FINEMAP, SuSiE-RSS, PolyFun+SuSiE, and V-SoRE.
+- **`ad_pipeline.R`** — end-to-end Alzheimer's disease application
+  driver. Reads Kunkle 2019 summary statistics, extracts the 17 loci,
+  computes LD from 1000 Genomes Phase 3 EUR, and runs all three methods.
+- **`make_ad_figures.R`** — generates Figures 2 and 3 from the saved
+  results.
+
+To run from a clone of this repository:
 
 ```bash
-Rscript simulate_main.R       # reproduces Table 1 (8 configs x 500 reps)
-Rscript simulate_supplement.R # reproduces Sections S12 (mismatch) and S13 (IIA)
+git clone https://github.com/chen-siyi7/SoRE.git
+cd SoRE
+R CMD INSTALL .
+Rscript inst/scripts/simulate_sore.R  # ~3 hours on 24 cores
 ```
 
-Both scripts save their output as RDS files. The main simulation runs in roughly 30 minutes on a single core; reduce `R_replicates` for a faster smoke test.
+The AD application requires the Kunkle 2019 summary statistics (NIAGADS
+access agreement) and the 1000 Genomes Phase 3 EUR genotypes. See
+`inst/scripts/ad_pipeline.R` for the expected directory layout.
 
-The Alzheimer's-disease application of Section 6 requires the following external data files, which are not redistributed with this code:
+## Diagnostic interpretation
 
-- **GWAS summary statistics:** Kunkle et al.\ 2019 Stage 1 (NIAGADS dataset NG00075).
-- **Reference-panel LD:** 1000 Genomes Phase 3, European subpopulation, available through the International Genome Sample Resource.
-- **Microglia ATAC-seq peaks:** Corces et al.\ 2020 (ENCODE accession ENCSR724KET).
-- **Prior-GWAS z-scores:** Bellenguez et al.\ 2022 (GWAS Catalog GCST90027158).
+The estimated tau^2 is the per-locus diagnostic. The calibrated
+thresholds are:
 
-A worked example using these inputs is described in Section 6.1 of the manuscript.
+| tau^2 range | Interpretation |
+|---|---|
+| < 0.2     | Strong annotation-data agreement |
+| 0.2 - 1.0 | Moderate agreement |
+| > 1.0     | Data has overridden annotation; treat as effectively unannotated |
 
-## Files
-
-| File                   | Purpose                                                     |
-| ---------------------- | ----------------------------------------------------------- |
-| `vsore.R`              | Core V-SoRE algorithm with uniform-weight bypass.           |
-| `weights.R`            | Annotation-weight construction and `compute_neff`.          |
-| `evaluate.R`           | Credible-set coverage / size and replicate aggregation.     |
-| `ld_utils.R`           | LD-matrix utilities and z-score sampler.                    |
-| `simulate_main.R`      | Main simulation reproducing Table 1.                        |
-| `simulate_supplement.R`| Supplementary simulations (mismatch, IIA).                  |
-| `test-vsore.R`         | testthat suite covering all exported functions.             |
-
-## Tests
-
-Run the full test suite:
-
-```r
-library(testthat)
-test_file("test-vsore.R")
-```
-
-All tests should pass on R `>= 4.1` with `susieR >= 0.12.0`.
-
-## Notes on the effective sample size
-
-The `compute_neff()` function implements eq. (7) of the manuscript, the liability-threshold-corrected effective sample size of Lee et al.\ 2012. With the AD application parameters (`n1 = 21,982`, `n0 = 41,944`, `K = 0.05`) it returns `54,238`. An unadjusted alternative `compute_neff_unadjusted()` returns `4 n1 n0 / N = 57,693` and is provided for comparison; it is not used in the manuscript.
-
-If you obtain a different value when reproducing the AD analysis, please verify that the population-prevalence value `K` you have used matches the one assumed in the original analysis.
-
-## License
-
-This code is distributed under the MIT License. See `LICENSE` for the full text.
+The helper `tau2_diagnostic()` returns these categories.
 
 ## Citation
 
-If you use this code in published work, please cite:
+If you use SoRE in your work, please cite:
 
-> Chen S. (2026) *Annotation-Ranked Bayesian Fine-Mapping of GWAS Signals with Data-Adaptive Reversion to Exchangeability.*
+> Chen, S. (2026). Bayesian Fine-Mapping with an Annotation Ranking Prior
+> Using GWAS Summary Statistics. *Biometrics*.
+
+```bibtex
+@article{chen2026sore,
+  title   = {Bayesian Fine-Mapping with an Annotation Ranking Prior Using GWAS Summary Statistics},
+  author  = {Chen, Siyi},
+  journal = {Biometrics},
+  year    = {2026}
+}
+```
+
+## License
+
+MIT License. See `LICENSE` for details.
 
 ## Contact
 
-Siyi Chen, School of Public Health, Louisiana State University Health Sciences Center New Orleans. Email: sche11@lsuhsc.edu.
+Siyi Chen
+School of Public Health
+LSU Health Sciences Center New Orleans
+sche11@lsuhsc.edu
+
+Bug reports and feature requests:
+[GitHub Issues](https://github.com/chen-siyi7/SoRE/issues)
